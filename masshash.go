@@ -7,30 +7,36 @@ import (
 	"log"
 	"encoding/hex"
 	"io"
-	"time"
 	"bufio"
+	"sync"
 )
 
-func computeHash(fileNames chan string, res chan string, quit chan bool) {
+var wg sync.WaitGroup
+var quit chan bool
+var res chan string
+
+func computeHash(fileNames chan string) {
 	for fname := range fileNames {
 		f, err := os.Open(fname)
 		hasher := sha256.New()
 		if err != nil {
 			log.Print(err)
+		} else {
+			defer f.Close()
+			_, err = io.Copy(hasher, f)
+			if err != nil {
+				log.Print(err)
+			} else {
+				hash := hex.EncodeToString(hasher.Sum(nil))
+				result := fmt.Sprintf("%s %s", hash, fname)
+				res <- result
+			}
 		}
-		_, err = io.Copy(hasher, f)
-		if err != nil {
-			log.Print(err)
-		}
-		f.Close()
-		hash := hex.EncodeToString(hasher.Sum(nil))
-		result := fmt.Sprintf("%s %s", hash, fname)
-		res <- result
 	}
-	quit <- true
+	wg.Done()
 }
 
-func printHashes(res chan string, quit chan bool) {
+func printHashes() {
 	for str := range res {
 		fmt.Println(str)
 	}
@@ -40,37 +46,27 @@ func printHashes(res chan string, quit chan bool) {
 func main() {
 	const nthreads int = 20
 
-	res := make(chan string)
+	res = make(chan string)
 	fileNames := make(chan string)
-	quitComputeHash := make (chan bool)
-	quit := make (chan bool)
+	quit = make (chan bool)
 	scanner := bufio.NewScanner(os.Stdin)
 
 	/* Launching the hashing threads */
-	for i:=0; i < nthreads; i++ {
-		go computeHash(fileNames, res, quitComputeHash)
+	wg.Add(nthreads)
+	for i := 0; i < nthreads; i++ {
+		go computeHash(fileNames)
 	}
 
 	/* Launching the printing thread */
-	go printHashes(res, quit)
+	go printHashes()
 
 	/* Feeding filenames to the hashing threads */
-	total := 0
 	for scanner.Scan() {
 		fileNames <- scanner.Text()
-		total++
 	}
-	close(fileNames)
-	for i := 0; i < nthreads; i++ {
-		<- quitComputeHash
-	}
-	close(res)
-	for {
-		select {
-		case <- quit:
-			return
-		default:
-			time.Sleep(500 * time.Millisecond)
-		}
-	}
+	close(fileNames) // No more files, we close the channel
+
+	wg.Wait() // Waiting for the hashing threads to finish
+	close(res)	// They won't be outputting anything anymore
+	<- quit
 }
